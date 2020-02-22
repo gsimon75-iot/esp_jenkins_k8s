@@ -1,0 +1,64 @@
+-
+    hosts: localhost
+    vars_files:
+        - external_vars.yaml
+    vars:
+        gcloud_creds_text: "{{ lookup('pipe', 'gcloud config config-helper --format=json') }}"
+        gcloud_credentials: "{{ gcloud_creds_text | json_query('@') }}"
+        container_repo_server: "eu.gcr.io"
+        sdk_image_folder: "esp8266-rtos-sdk-image"
+        toolchain_tarball: "xtensa-lx106-elf-linux64-1.22.0-100-ge567ec7-5.2.0.tar.gz"
+    tags: create
+    tasks:
+        -
+            name: Fetch the ESP8266 RTOS SDK tarball
+            vars:
+                url: "https://dl.espressif.com/dl/{{ toolchain_tarball }}"
+                dest: "{{ sdk_image_folder }}/{{ toolchain_tarball }}"
+            include_role:
+                name: "download-if-needed"
+        -
+            name: Build the ESP8266 RTOS SDK image
+            become: true
+            changed_when: true # force re-building the image, 'force_source' isn't enough
+            docker_image:
+                name: "esp8266-rtos-sdk:latest"
+                source: build
+                force_source: true
+                build:
+                    pull: true
+                    rm: true
+                    path: "{{ sdk_image_folder }}"
+                    args:
+                        TOOLCHAIN_TARBALL: "{{ toolchain_tarball }}"
+        -
+            name: Log previous sessions out of container repo
+            become: true
+            docker_login:
+                registry_url: "https://{{ container_repo_server }}"
+                state: absent
+        -
+            name: Log in to container repo
+            become: true
+            docker_login:
+                registry_url: "https://{{ container_repo_server }}"
+                username: "_dcgcloud_token"
+                password: "{{ gcloud_credentials.credential.access_token }}"
+        -
+            name: Tag and push the ESP8266 RTOS SDK image to the container repo
+            become: true
+            docker_image:
+                name: "esp8266-rtos-sdk"
+                tag: "latest"
+                force_tag: true
+                push: true
+                repository: "{{ container_repo_server }}/{{ gcp_project_id }}/esp8266-rtos-sdk"
+                source: local
+        -
+            name: Log out of container repo
+            become: true
+            docker_login:
+                registry_url: "https://{{ container_repo_server }}"
+                state: absent
+
+# vim: set sw=4 ts=4 et indk= :

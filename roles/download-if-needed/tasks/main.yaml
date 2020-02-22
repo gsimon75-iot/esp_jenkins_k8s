@@ -1,0 +1,48 @@
+# Fetch an URL to a local file, but only if
+#  - The local file doesn't exist
+#  - The local file exists but is older
+#  - The local file exists, has the same mtime, but its size differs
+
+-
+    name: Get URL status
+    shell:
+        cmd: "curl -sLI {{ url }}"
+        warn: false
+    register: headers
+    failed_when: headers.stdout_lines[0] != "HTTP/1.1 200 OK"
+-
+    name: Get dest file status
+    stat:
+        get_attributes: true
+        get_checksum: false
+        get_mime: false
+        path: "{{ dest }}"
+    register: file_stat
+    ignore_errors: true
+-
+    name: Decide if need to (re-)fetch the URL
+    vars:
+        url_headers: "{{ headers.stdout_lines | html_headers }}"
+        url_mtime: "{{ ((url_headers['Last-Modified'] | to_datetime('%a, %d %b %Y %H:%M:%S %Z')) - ('1970-01-01 00:00:00' | to_datetime)).total_seconds() }}"
+        url_size: "{{ url_headers['Content-Length'] }}"
+        # NOTE: Facts and variables are one of Dictionary, List or AnsibleUnsafeText.
+        # No use to do {{ ... | float }} here. That'll be needed at *everywhere* you use it...
+        # https://github.com/ansible/ansible/issues/5463
+
+    when: not file_stat.stat.exists or not file_stat.stat.isreg or (file_stat.stat.mtime < url_mtime|float) or ((file_stat.stat.mtime == url_mtime|float) and (file_stat.stat.size != url_size|int))
+    block:
+        -
+            name: Fetch the URL
+            get_url:
+                url: "{{ url }}"
+                dest: "{{ dest }}"
+                force: true
+                mode: 0644
+        -
+            name: Fix the mtime of the dest file
+            file:
+                path: "{{ dest }}"
+                modification_time_format: "%a, %d %b %Y %H:%M:%S %Z"
+                modification_time: "{{ url_headers['Last-Modified'] }}"
+
+# vim: set sw=4 ts=4 et indk= :

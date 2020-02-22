@@ -1,0 +1,247 @@
+-
+    hosts: localhost
+    vars_files:
+        - external_vars.yaml
+    vars:
+        gcloud_creds_text: "{{ lookup('pipe', 'gcloud config config-helper --format=json') }}"
+        gcloud_credentials: "{{ gcloud_creds_text | json_query('@') }}"
+        long_name: "Jenkins Master"
+        short_name: "jenkins-master"
+        external_ip: "{{ lookup('dig', jenkins_master_external_name) }}"
+        #external_ip: "34.77.91.178"
+    tasks:
+        -
+            tags: always
+            include_role:
+                name: "common"
+        -
+            name: "Create temporary file for API CA Cert"
+            tags: always
+            tempfile:
+                state: file
+                suffix: temp
+            register: api_ca_cert_file
+        -
+            name: "Writing the API CA Cert to the temp file"
+            tags: always
+            blockinfile:
+                path: "{{ api_ca_cert_file.path }}"
+                marker: ""
+                block: "{{ cluster.masterAuth.clusterCaCertificate | b64decode }}"
+        -
+            name: "Create secrets for {{ long_name }}"
+            tags: create
+            k8s:
+                host: "https://{{ cluster.endpoint }}"
+                ca_cert: "{{ api_ca_cert_file.path }}"
+                api_key: "{{ gcloud_credentials.credential.access_token }}"
+                namespace: "default"
+                definition:
+                    apiVersion: v1
+                    kind: Secret
+                    metadata:
+                        name: "{{ short_name }}"
+                    data: # NOTE: set as b64-coded string, will appear as 64-decoded when mounted
+                        keystore: "{{ lookup('file', https_keystore_file) | b64encode }}"
+        -
+            name: "Create PVC for {{ long_name }}"
+            tags: create
+            k8s:
+                host: "https://{{ cluster.endpoint }}"
+                ca_cert: "{{ api_ca_cert_file.path }}"
+                api_key: "{{ gcloud_credentials.credential.access_token }}"
+                namespace: "default"
+                definition:
+                    apiVersion: v1
+                    kind: PersistentVolumeClaim
+                    metadata:
+                        name: "{{ short_name }}-home"
+                    spec:
+                        accessModes:
+                            - ReadWriteOnce
+                        volumeMode: Filesystem
+                        resources:
+                            requests:
+                                storage: 16Mi
+        -
+            name: "Create deployment for {{ long_name }}"
+            tags: create
+            k8s:
+                host: "https://{{ cluster.endpoint }}"
+                ca_cert: "{{ api_ca_cert_file.path }}"
+                api_key: "{{ gcloud_credentials.credential.access_token }}"
+                namespace: "default"
+                definition:
+                    apiVersion: apps/v1
+                    kind: Deployment
+                    metadata:
+                        name: "{{ short_name }}"
+                    spec:
+                        replicas: 1
+                        strategy:
+                            type: RollingUpdate
+                            rollingUpdate:
+                                maxUnavailable: 1
+                                maxSurge: 0
+                        selector:
+                            matchLabels:
+                                role: master
+                        template:
+                            metadata:
+                                labels:
+                                    role: master
+                            spec:
+                                securityContext:
+                                    runAsUser: 1000
+                                    runAsGroup: 1000
+                                    fsGroup: 1000
+                                containers:
+                                    -
+                                        # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.11/#container-v1-core
+                                        name: "{{ short_name }}"
+                                        image: jenkins/jenkins
+                                        #command: [ "/bin/bash", "-c", "while true; do sleep 10; done" ]
+                                        env:
+                                            -
+                                                name: JENKINS_OPTS
+                                                value: "--httpPort=-1 --httpsPort=8443 --httpsKeyStore=/var/jenkins_secrets/jenkins.jks --httpsKeyStorePassword={{ https_keystore_pass }}"
+                                            -
+                                                name: JENKINS_SLAVE_AGENT_PORT
+                                                value: "50000"
+                                            -
+                                                name: CURL_CONNECTION_TIMEOUT
+                                                value: "600"
+                                            -
+                                                name: CURL_RETRY
+                                                value: "99"
+                                            -
+                                                name: CURL_RETRY_MAX_TIME
+                                                value: "600"
+                                        resources:
+                                            requests:
+                                                cpu: 400m
+                                                memory: 100Mi
+                                                ephemeral-storage: 1Mi
+                                        ports:
+                                            -
+                                                containerPort: 8443
+                                            -
+                                                containerPort: 50000
+                                        volumeMounts:
+                                            -
+                                                mountPath: /var/jenkins_home
+                                                name: home
+                                            -
+                                                mountPath: /var/jenkins_secrets
+                                                name: secrets
+
+                                volumes:
+                                    -
+                                        name: home
+                                        persistentVolumeClaim:
+                                            claimName: "{{ short_name }}-home"
+                                    -
+                                        name: secrets
+                                        secret:
+                                            secretName: "{{ short_name }}"
+                                            items:
+                                                -
+                                                    key: keystore
+                                                    path: "jenkins.jks"
+        -
+            name: "Create service for {{ long_name }}"
+            tags: create
+            k8s:
+                host: "https://{{ cluster.endpoint }}"
+                ca_cert: "{{ api_ca_cert_file.path }}"
+                api_key: "{{ gcloud_credentials.credential.access_token }}"
+                namespace: "default"
+                definition:
+                    apiVersion: v1
+                    kind: Service
+                    metadata:
+                        name: "{{ short_name }}"
+                        labels:
+                            role: master
+                    spec:
+                        type: LoadBalancer
+                        loadBalancerIP: "{{ external_ip }}"
+                        selector:
+                            role: master
+                        ports:
+                            -
+                                name: "ui"
+                                port: 443
+                                targetPort: 8443
+                            -
+                                name: "jnlp"
+                                port: 50000
+                                targetPort: 50000
+        -
+            name: "Destroy service for {{ long_name }}"
+            tags: [never, destroy]
+            k8s:
+                host: "https://{{ cluster.endpoint }}"
+                ca_cert: "{{ api_ca_cert_file.path }}"
+                api_key: "{{ gcloud_credentials.credential.access_token }}"
+                namespace: "default"
+                state: absent
+                definition:
+                    apiVersion: v1
+                    kind: Service
+                    metadata:
+                        name: "{{ short_name }}"
+                        labels:
+                            role: master
+        -
+            name: "Destroy deployment for {{ long_name }}"
+            tags: [never, destroy]
+            k8s:
+                host: "https://{{ cluster.endpoint }}"
+                ca_cert: "{{ api_ca_cert_file.path }}"
+                api_key: "{{ gcloud_credentials.credential.access_token }}"
+                namespace: "default"
+                state: absent
+                definition:
+                    apiVersion: apps/v1
+                    kind: Deployment
+                    metadata:
+                        name: "{{ short_name }}"
+        -
+            name: "Destroy PVC for {{ long_name }}"
+            tags: [never, destroy]
+            k8s:
+                host: "https://{{ cluster.endpoint }}"
+                ca_cert: "{{ api_ca_cert_file.path }}"
+                api_key: "{{ gcloud_credentials.credential.access_token }}"
+                namespace: "default"
+                state: absent
+                definition:
+                    apiVersion: v1
+                    kind: PersistentVolumeClaim
+                    metadata:
+                        name: "{{ short_name }}-home"
+        -
+            name: "Destroy secrets for {{ long_name }}"
+            tags: [never, destroy]
+            k8s:
+                host: "https://{{ cluster.endpoint }}"
+                ca_cert: "{{ api_ca_cert_file.path }}"
+                api_key: "{{ gcloud_credentials.credential.access_token }}"
+                namespace: "default"
+                state: absent
+                definition:
+                    apiVersion: v1
+                    kind: Secret
+                    metadata:
+                        name: "{{ short_name }}"
+        -
+            name: "Remove the temporary API CA Cert file"
+            tags: always
+            when: api_ca_cert_file.path is defined
+            file:
+                path: "{{ api_ca_cert_file.path }}"
+                state: absent
+
+
+# vim: set sw=4 ts=4 et indk= :

@@ -1,0 +1,80 @@
+-
+    hosts: localhost
+    vars_files:
+        - external_vars.yaml
+    vars:
+        service_account_content: "{{ lookup('file', gcp_cred_file) }}"
+        service_account_email: "{{ service_account_content | json_query('client_email') }}"
+    tasks:
+        -
+            name: Create the cluster
+            tags: create
+            gcp_container_cluster:
+                project: "{{ gcp_project_id }}"
+                auth_kind: serviceaccount
+                service_account_file: "{{ gcp_cred_file }}"
+                name: "{{ cluster_name }}"
+                zone: "{{gcp_zone }}"
+                initial_node_count: 1
+                node_config:
+                    machine_type: g1-small
+                    disk_size_gb: 10
+                    preemptible: true
+            register: cluster
+        -
+            name: Create the real node pool
+            tags: create
+            gcp_container_node_pool:
+                project: "{{ gcp_project_id }}"
+                auth_kind: serviceaccount
+                service_account_file: "{{ gcp_cred_file }}"
+                name: "the-real-pool"
+                zone: "{{gcp_zone }}"
+                cluster: "{{ cluster }}"
+                initial_node_count: 2
+                autoscaling:
+                    enabled: true
+                    min_node_count: 1
+                    max_node_count: 3
+                config:
+                    machine_type: g1-small
+                    disk_size_gb: 10
+                    preemptible: true
+                    metadata:
+                        disable-legacy-endpoints: "true"
+                    oauth_scopes:
+                        - "https://www.googleapis.com/auth/logging.write" 
+                        - "https://www.googleapis.com/auth/monitoring"
+                        - "https://www.googleapis.com/auth/cloud-platform"
+                    service_account: "{{ service_account_email }}"
+                management:
+                    auto_repair: true
+                    auto_upgrade: false
+                version: 
+            register: node_pool
+        -
+            name: Delete the implicite node pool
+            tags: create
+            gcp_container_node_pool:
+                project: "{{ gcp_project_id }}"
+                auth_kind: serviceaccount
+                service_account_file: "{{ gcp_cred_file }}"
+                name: "default-pool"
+                zone: "{{gcp_zone }}"
+                cluster: "{{ cluster }}"
+                initial_node_count:
+                state: absent
+        -
+            name: Destroy the cluster
+            tags: [never, destroy]
+            gcp_container_cluster:
+                project: "{{ gcp_project_id }}"
+                auth_kind: serviceaccount
+                service_account_file: "{{ gcp_cred_file }}"
+                name: "{{ cluster_name }}"
+                zone: "{{gcp_zone }}"
+                initial_node_count: 1
+                node_config:
+                state: absent
+
+# vim: set sw=4 ts=4 et indk= :

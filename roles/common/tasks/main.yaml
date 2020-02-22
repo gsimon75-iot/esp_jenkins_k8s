@@ -1,0 +1,17 @@
+-
+    name: Gather cluster facts
+    tags: always
+    when: cluster is not defined
+    gcp_container_cluster_info:
+        project: "{{ gcp_project_id }}"
+        auth_kind: serviceaccount
+        service_account_file: "{{ gcp_cred_file }}"
+        zone: "{{gcp_zone }}"
+    register: clusters
+-
+    tags: always
+    when: cluster is not defined
+    set_fact:
+        cluster: "{{ clusters['resources'] | selectattr('name', 'match', cluster_name) | first }}"
+
+# vim: set sw=4 ts=4 et indk= :

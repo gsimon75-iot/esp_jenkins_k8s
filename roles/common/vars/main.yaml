@@ -1,0 +1,4 @@
+gcloud_creds_text: "{{ lookup('pipe', 'gcloud config config-helper --format=json') }}"
+gcloud_credentials: "{{ gcloud_creds_text | json_query('@') }}"
+
+# vim: set sw=4 ts=4 et indk= :

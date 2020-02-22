@@ -1,0 +1,12 @@
+gcp_region: "europe-west1"
+gcp_zone: "europe-west1-c"
+
+gcp_project_id: "networksandbox-232012"
+gcp_cred_file: "service_account.json"
+
+cluster_name: "jenkins-cluster"
+jenkins_master_external_name: "jenkins.mydomain.com"
+https_keystore_file: "jenkins.jks"
+https_keystore_pass: "my jks password"
+
+# vim: set sw=4 ts=4 et indk= :
