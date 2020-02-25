@@ -1,4 +1,4 @@
-# A jenkins build farm for ESP RTOS SDK projects, running on Google Kubernetes Engine
+# A Jenkins build farm for ESP RTOS SDK projects, running on Google Kubernetes Engine
 
 ## Overview
 
