@@ -28,8 +28,6 @@ targets the same goal with their RTOS SDK IDF-style, it seems quite feasible. Ho
 it supports only ESP8266, because I wanted to get it working first, and add the features only
 after this.
 
-**FIXME: Add ESP32 support**
-
 So we'll need a custom Docker image for these build agents, that contain both the ESP toolchain and
 the SDK, and the Jenkins build agent functionality as well.
 
@@ -43,11 +41,8 @@ requirements in details.
 By default the resulting artifacts are collected on the Jenkins Master, but they can be deployed by various Jenkins
 plugins as well.
 
-NOTE: At worst I'll just mount a persistent volume (ie. a disk) to that folder on the Master, but
-I haven't yet decided what to do exactly with the artifacts, so now they are just piling up on the
-Jenkins Masters persistent home volume.
-
-**FIXME: Decide how to handle the artifacts**
+One of these plugins is the Google Storage Plugin, which we'll use to upload the resulting artifacts to a
+Google Storage bucket, which we'll configure to have public read access.
 
 Finally, we need to configure Jenkins to actually do all the building stuff.
 
@@ -426,11 +421,11 @@ build step, and Jenkins will choose/spawn the agent accordingly.
     - Max connections to Kubernetes API: 32
     - Seconds to wait for pod to be running: 600
     - Pod Templates / Add Pod Template:
-        - Name: **esp-builder-pod**
+        - Name: **esp8266-builder-pod**
         - Pod Template Details:
-            - Name: **esp-builder-pod**
+            - Name: **esp8266-builder-pod**
             - Namespace: default
-            - Labels: **esp-builder**
+            - Labels: **esp8266-builder**
             - Usage: Only build jobs with label expressions matching this node
             - Containers / Container Template:
                 - Name: **jnlp**
@@ -477,15 +472,16 @@ So we'll create a Project exactly for that:
 
 The setup:
 
-- New Item / Name: **my-esp-demo** / Freestyle project / OK:
+- New Item / Name: **my-esp8266-demo** / Freestyle project / OK:
     - Discard old builds: [X]
         - Max # of builds to keep: 2
     - GitHub project: [X]
         - Project url: **`https://github.com/gsimon75-iot/esp_rtos_project_skel`**
         - Restrict where this project can be run: [X]
-            - Label Expression: **esp-builder**
+            - Label Expression: **esp8266-builder**
     - Source Code Management / Git: [X]
         - Repository URL: **`https://github.com/gsimon75-iot/esp_rtos_project_skel.git`**
+        - Branch: master (this is the default)
     - Build triggers:
         - GitHub hook trigger for GITScm polling: [X]
     - Build / Add build step / Execute shell:
@@ -499,7 +495,96 @@ Once for the "GitHub project", this goes to the [GitHub plugin](https://github.c
 later for automatic job triggering and build status reporting, and once for "Source Code Management", this goes to the
 Git plugin and tells where to clone the sources from.
 
-You may have also noticed the label "esp-builder": this is the point where the project and the agent are connected.
+You may have also noticed the label "esp8266-builder": this is the point where the project and the agent are connected.
+
+
+## Build environment for ESP32
+
+As you may have expected, very similar to the ESP8266, the differences are:
+
+- Manage Jenkins / Manage Nodes and Clouds / Configure Clouds / the-farm:
+    - Pod Templates / Add Pod Template:
+        - Name: **esp-builder-pod**
+        - Pod Template Details:
+            - Name: **esp32-builder-pod**
+            - Namespace: default
+            - Labels: **esp32-builder**
+            - Usage: Only build jobs with label expressions matching this node
+            - Containers / Container Template:
+                - Name: **jnlp**
+                - Docker image: **eu.gcr.io/networksandbox-232012/esp32-rtos-sdk**
+                - Always pull image: [X]
+                - Working directory: /home/jenkins/agent
+                - Command to run: **<empty>**
+                - Arguments to pass to the command: **<empty>**
+                - Allocate pseudo TTY: [X]
+
+When creating an ESP32 project:
+
+- New Item / Name: **my-esp32-demo** / Freestyle project / OK:
+    - Discard old builds: [X]
+        - Max # of builds to keep: 2
+    - GitHub project: [X]
+        - Project url: **`https://github.com/gsimon75-iot/esp_rtos_project_skel`**
+        - Branch: esp32
+        - Restrict where this project can be run: [X]
+            - Label Expression: **esp8266-builder**
+    - Source Code Management / Git: [X]
+        - Repository URL: **`https://github.com/gsimon75-iot/esp_rtos_project_skel.git`**
+    - Build triggers:
+        - GitHub hook trigger for GITScm polling: [X]
+    - Build / Add build step / Execute shell:
+        - Command:
+```
+#!/bin/bash
+
+. $IDF_PATH/export.sh
+idf.py build
+```
+    - Post-build Actions / Add post-build action / Archive the artifacts:
+        - Files to archive: build/bootloader/bootloader.bin,build/partition_table/partition-table.bin,build/hello-world.bin
+
+
+
+## Configuring the artifact deployment
+
+As I don't want to manage a web-accessible storage just for this, I decided to use the [Google Storage Plugin](https://github.com/jenkinsci/google-storage-plugin).
+
+So let's create a storage bucket for the artifacts:
+
+- On the GCP Console choose [Menu / Storage](https://console.cloud.google.com/storage)
+- Create bucket:
+    - If you want to add this bucket as part of your domain (like esp32-builds.yourdomain.com), then you must [prove](https://cloud.google.com/storage/docs/domain-name-verification)
+        that you indeed control that domain
+    - Name: `esp32-builds.yourdomain.com`
+    - Location type: Region, (+ choose the region you use for your cluster)
+    - Storage class: Standard (Nearline is cheaper per GB, but more expensive per access)
+    - Access Control: Fine grained
+
+
+Now configure your project (`my-esp32-demo`) and add a Post-build Action:
+    - Post-build Actions / Add post-build action / Google Cloud Storage Plugin:
+    - Delete the suggested 'Build Log Upload'
+    - Add Operation / Classic Upload:
+        - File Pattern: build-log.txt,build/bootloader/bootloader.bin,build/partition_table/partition-table.bin,build/hello-world.bin
+        - Storage Location: `gs://esp32-builds.yourdomain.com/$JOB_NAME/$BUILD_NUMBER`
+          The 'gs://...' link is from the GCP Storage console, the details of your bucket, Overview, Link for gsutil.
+
+
+The next build shall also upload the binaries to the Storage Bucket.
+
+After confirming that it indeed works, the 'Archive the artifacts' post-build action is no longer needed and can be deleted.
+
+### Making the bucket publicly accessible
+
+See [Making data public](https://cloud.google.com/storage/docs/access-control/making-data-public#buckets) and
+[Hosting static website](https://cloud.google.com/storage/docs/hosting-static-website).
+
+NOTE: GCP Storage website supports no automatic directory listing.
+
+FIXME: I must resolve this somehow.
+
+
 
 
 ## TODO
@@ -508,8 +593,6 @@ So that's how it is now. As of the future things I have in mind:
 
 - Automatic build triggering after a push to github
 - Finetuning Jenkins permissions
-- Dealing with the artifacts
-- ESP32 support
 - Support for collateral goals like building docs from in-code comments
 - Etc.
 - Stop the feature creep :D
