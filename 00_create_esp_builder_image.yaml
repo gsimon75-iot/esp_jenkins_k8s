@@ -13,6 +13,7 @@
     tasks:
         -
             name: Fetch the ESP8266 RTOS SDK tarball
+            tags: esp8266
             vars:
                 url: "https://dl.espressif.com/dl/{{ toolchain_tarball }}"
                 dest: "{{ esp8266_image_folder }}/{{ toolchain_tarball }}"
@@ -20,6 +21,7 @@
                 name: "download-if-needed"
         -
             name: Build the ESP8266 RTOS SDK image
+            tags: esp8266
             become: true
             changed_when: true # force re-building the image, 'force_source' isn't enough
             docker_image:
@@ -34,6 +36,7 @@
                         TOOLCHAIN_TARBALL: "{{ toolchain_tarball }}"
         -
             name: Build the ESP32 RTOS SDK image
+            tags: esp32
             become: true
             changed_when: true # force re-building the image, 'force_source' isn't enough
             docker_image:
@@ -46,12 +49,14 @@
                     path: "{{ esp32_image_folder }}"
         -
             name: Log previous sessions out of container repo
+            tags: always
             become: true
             docker_login:
                 registry_url: "https://{{ container_repo_server }}"
                 state: absent
         -
             name: Log in to container repo
+            tags: always
             become: true
             docker_login:
                 registry_url: "https://{{ container_repo_server }}"
@@ -59,6 +64,7 @@
                 password: "{{ gcloud_credentials.credential.access_token }}"
         -
             name: Tag and push the ESP8266 RTOS SDK image to the container repo
+            tags: esp8266
             become: true
             docker_image:
                 name: "esp8266-rtos-sdk"
@@ -69,6 +75,7 @@
                 source: local
         -
             name: Tag and push the ESP32 RTOS SDK image to the container repo
+            tags: esp32
             become: true
             docker_image:
                 name: "esp32-rtos-sdk"
@@ -79,6 +86,7 @@
                 source: local
         -
             name: Log out of container repo
+            tags: always
             become: true
             docker_login:
                 registry_url: "https://{{ container_repo_server }}"

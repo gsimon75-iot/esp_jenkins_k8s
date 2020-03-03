@@ -585,13 +585,167 @@ NOTE: GCP Storage website supports no automatic directory listing.
 FIXME: I must resolve this somehow.
 
 
+## Optional: Using the image on CloudReady
+
+CloudReady is essentially a thin-client OS, with no usual package management. It's just not aimed to work locally, but
+it's extremely useful for working on remote servers.
+
+Which has some merits, as I can work from any client machine, from any OS, and if I want to completely reinstall my
+laptop, I don't have to worry about whether all my stuff will work afterwards or not. This wasn't true for other OSes,
+where after each upgrade I had to check everything whether it broke or not...
+
+But there is one thing that cannot be done remotely: pushing the binaries to the devices.
+
+On any Linux or Windows it's no problem: just install python (either 2.7 or 3.x), virtualenv, pip, then create a
+virtualenv, use pip to install pyserial and esptool, and there you go.
+
+On CloudReady there is no pip, no distribution, no packages. The USB serial device node /dev/ttyUSB0 appears, so we're
+*almost* there, but not quite yet.
+
+My *failed* attempts to tackle this problem:
+
+1. The Linux support of CloudReady. It's not a chroot or a jail, it's a highly customized full-scale VM called `crosvm`.
+    It does have some USB support, but only for Android devices, which it propagates to the VM with a protocol-level
+    separation, so it can't propagate a plain USB serial device. It's features aren't documented anywhere, and no
+    arbitrary number of "I think it can't do it" brings certainty, so I had to dig into the sources to figure that out.
+
+2. CloudReady has VirtualBox. Yeah, 5.2.12, whose Guest Additions can be built on CentOS 7.5 and prior only. More
+    precisely, the last kernel package version is kernel-3.10.0-862, so even on 7.5 you have to exclude refreshing the
+    "kernel-*" packages.  7.5 being way too obsolete now, it's available only at the Vault (and iso images only at some
+    vault mirrors), so it's an enlightening exercise to get it installed and build the Guest Additions in it.
+    But you may just skip it if you like, because neither the clipboard sharing, nor the seamless window support will
+    work with plain console, and having a full VM with emulated X11 and whatnot is just an overkill for having a plain
+    `esptool.py`
+
+3. Building an independent python to a folder like `/usr/local/python-3.8.2`, because on CloudReady `/usr/local` is
+    mounted as writeable and without the noexec flag. Building python is extremely straightforward and easy, but the
+    executables will still depend on the libc version that was present at build, so there are thin chances that it'll
+    work on CloudReady. Building python as a statically linked executable, that's way more complex, and I'm not sure
+    if it still can be done with the 3.x versions.
+
+So my next attempt was to use Docker, which [can be enabled](https://neverware.zendesk.com/hc/en-us/community/posts/360034785414-Enable-Docker),
+and use the builder image, as it already contains everything to flash the binaries. (And even do local builds, though
+it wasn't my goal...)
+
+So, enabling docker:
+- One-time start: `sudo start docker`
+- On every restart: `sudo touch /home/chronos/.enable_docker_service` and restart
+
+NOTE: Haven't automated this yet, so after every reboot I have to execute this manually:
+`echo "2" | sudo tee /sys/fs/cgroup/cpuset/docker/cpuset.cpus`, otherwise `docker run` fails with an error
+message that it can't write '0-7' to this sysfs entry.
+
+
+First we must [authenticate](https://cloud.google.com/container-registry/docs/advanced-authentication) for accessing
+the image, otherwise we'll just get an error:
+
+```
+chronos@localhost ~ $ sudo docker image pull eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
+Using default tag: latest
+Error response from daemon: unauthorized: You don't have the needed permissions to perform this operation, and you may have invalid credentials. To authenticate your request, follow the steps in: https://cloud.google.com/container-registry/docs/advanced-authentication
+```
+
+To get the short-term access token (username and password): `echo "https://eu.gcr.io" | gcloud auth docker-helper get`,
+and expects the credentials in .json format: `{ "Secret": "...", "Username": "_dcgcloud_token" }`
+
+Then we need to tell docker to log in with these credentials and then to pull the image. As the token is short-lived,
+it's better to issue the `docker pull` command first, knowing that it'll fail, but then it will be in the command
+history and it'll be faster to re-execute it again after the login.
+
+So, if we have those credentials above, then
+
+```
+chronos@localhost ~ $ sudo docker --config /tmp/.docker login -u _dcgcloud_token -p "ya29.<auth token ascii random>" https://eu.gcr.io
+WARNING! Using --password via the CLI is insecure. Use --password-stdin.
+Login Succeeded
+chronos@localhost ~ $ sudo docker --config /tmp/.docker image pull eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
+Using default tag: latest
+...
+```
+
+Launching a container from this image as a test and to look around in it:
+`sudo docker run --rm -it --entrypoint /bin/bash eu.gcr.io/networksandbox-232012/esp32-rtos-sdk`
+
+To have access to the USB serial device node, let the jenkins user access it and then let's bind-mount the hosts `/dev`
+into the container as `/hostdev`:
+
+`sudo chmod 666 /dev/ttyUSB0`
+
+And then the docker command (NOTE: The environment variables `ESPTOOL_PORT` and `ESPTOOL_BAUD` are already set in the image):
+
+```
+chronos@localhost ~/Downloads/src $ sudo docker run --rm -it --entrypoint=/bin/bash --privileged=true -v /dev:/hostdev eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
+Adding ESP-IDF tools to PATH...
+Checking if Python packages are up to date...
+Python requirements from /home/jenkins/esp/esp-idf/requirements.txt are satisfied.
+Added the following directories to PATH:
+...
+Done! You can now compile ESP-IDF projects.
+Go to the project directory and run:
+
+  idf.py build
+
+jenkins@848f00d4e10f:~$ esptool.py chip_id
+esptool.py v2.8
+Serial port /hostdev/ttyUSB0
+Connecting....
+Detecting chip type... ESP32
+Chip is ESP32D0WDQ6 (revision 1)
+Features: WiFi, BT, Dual Core, 240MHz, VRef calibration in efuse, Coding Scheme None
+Crystal is 40MHz
+MAC: 24:6f:28:b4:88:3c
+Uploading stub...
+Running stub...
+Stub running...
+Warning: ESP32 has no Chip ID. Reading MAC instead.
+MAC: 24:6f:28:b4:88:3c
+Hard resetting via RTS pin...
+```
+
+To flash the binaries we should
+
+1. Download them to some local folder
+2. Bind-mount that folder into the container
+3. Flash them to the device
+
+
+```
+mkdir ~/Downloads/esp32-demo-latest
+cd ~/Downloads/esp32-demo-latest
+curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/bootloader/bootloader.bin
+curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/hello-world.bin
+curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/partition_table/partition-table.bin
+```
+
+```
+sudo docker run --rm -it --entrypoint=/bin/bash --privileged=true -v /dev:/hostdev -v ~/Downloads/esp32-demo-latest:/home/jenkins/images eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
+esptool.py --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 40m 0x1000 images/bootloader.bin 0x8000 images/partition-table.bin 0x10000 images/hello-world.bin
+```
+
+
+### Building the binaries on localhost
+
+Of course to do any work in that container we'd need the sources, which (in this example) I've cloned into
+`/home/chronos/Downloads/src/esp32_rtos_project_skel` and that we'll bind-mount into the container as well:
+
+```
+sudo docker run --rm -it --entrypoint=/bin/bash --privileged=true -v /dev:/hostdev -v ~/Downloads/src/esp32_rtos_project_skel:/home/jenkins/agent/workspace/esp32-demo eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
+```
+
+**FIXME:** docker seems to have trouble with `fscrypt`, because the bind-mounted folder is not writeable:
+```
+jenkins@b763229fadac:~/agent/workspace/esp32-demo$ touch build/qwer
+touch: cannot touch 'build/qwer': Required key not available
+```
+
+Others seem to have encountered [something](https://github.com/google/fscrypt/issues/128) like this.
+
 
 
 ## TODO
 
 So that's how it is now. As of the future things I have in mind:
 
-- Automatic build triggering after a push to github
 - Finetuning Jenkins permissions
 - Support for collateral goals like building docs from in-code comments
 - Etc.
