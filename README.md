@@ -239,9 +239,6 @@ Jenkins stores all its settings, plugin updates, database, etc. in the home of t
 Jenkins runs as `jenkins` user (uid=1000), but volume mounts are owned by root:root, so by default the `jenkins` user couldn't access its own home directory.
 To resolve this, the mounting *group* must be explicitely specified in template.spec.securityContext.fsGroup.
 
-FIXME: Now the produced binaries are just piling up in the home folder in `/var/jenkins_home/jobs/<project-name>/builds/<build-nr>/archive/`,
-so either a deployment step (and infrastructure) will be needed, or at least a persistent volume mount for `.../jobs`.
-
 
 ### Plugin installer timeouts
 
@@ -582,7 +579,7 @@ See [Making data public](https://cloud.google.com/storage/docs/access-control/ma
 
 NOTE: GCP Storage website supports no automatic directory listing.
 
-FIXME: I must resolve this somehow.
+FIXME: Resolve this somehow.
 
 
 ## Optional: Using the image on CloudReady
@@ -635,9 +632,8 @@ NOTE: Haven't automated this yet, so after every reboot I have to execute this m
 `echo "2" | sudo tee /sys/fs/cgroup/cpuset/docker/cpuset.cpus`, otherwise `docker run` fails with an error
 message that it can't write '0-7' to this sysfs entry.
 
-
-First we must [authenticate](https://cloud.google.com/container-registry/docs/advanced-authentication) for accessing
-the image, otherwise we'll just get an error:
+Then we must pull the docker image, but first we must [authenticate](https://cloud.google.com/container-registry/docs/advanced-authentication)
+for accessing it, otherwise we'll just get an error:
 
 ```
 chronos@localhost ~ $ sudo docker image pull eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
@@ -646,7 +642,7 @@ Error response from daemon: unauthorized: You don't have the needed permissions 
 ```
 
 To get the short-term access token (username and password): `echo "https://eu.gcr.io" | gcloud auth docker-helper get`,
-and expects the credentials in .json format: `{ "Secret": "...", "Username": "_dcgcloud_token" }`
+this dumps the credentials in .json format: `{ "Secret": "...", "Username": "_dcgcloud_token" }`
 
 Then we need to tell docker to log in with these credentials and then to pull the image. As the token is short-lived,
 it's better to issue the `docker pull` command first, knowing that it'll fail, but then it will be in the command
@@ -656,8 +652,9 @@ So, if we have those credentials above, then
 
 ```
 chronos@localhost ~ $ sudo docker --config /tmp/.docker login -u _dcgcloud_token -p "ya29.<auth token ascii random>" https://eu.gcr.io
-WARNING! Using --password via the CLI is insecure. Use --password-stdin.
+...
 Login Succeeded
+
 chronos@localhost ~ $ sudo docker --config /tmp/.docker image pull eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
 Using default tag: latest
 ...
@@ -666,12 +663,13 @@ Using default tag: latest
 Launching a container from this image as a test and to look around in it:
 `sudo docker run --rm -it --entrypoint /bin/bash eu.gcr.io/networksandbox-232012/esp32-rtos-sdk`
 
-To have access to the USB serial device node, let the jenkins user access it and then let's bind-mount the hosts `/dev`
-into the container as `/hostdev`:
-
+As the container runs as a normal user, in order to access the USB serial device node, we have to change its permissions:
 `sudo chmod 666 /dev/ttyUSB0`
 
-And then the docker command (NOTE: The environment variables `ESPTOOL_PORT` and `ESPTOOL_BAUD` are already set in the image):
+We will bind-mount the `/dev` into the container as `/hostdev`, so the device node will appear as `/hostdev/ttyUSB0`.
+(NOTE: The image already has an environment variable `ESPTOOL_PORT` point to this.)
+
+Then the actual docker command:
 
 ```
 chronos@localhost ~/Downloads/src $ sudo docker run --rm -it --entrypoint=/bin/bash --privileged=true -v /dev:/hostdev eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
@@ -702,44 +700,72 @@ MAC: 24:6f:28:b4:88:3c
 Hard resetting via RTS pin...
 ```
 
+So finally we can access the device.
+
+### Flashing the binaries
+
 To flash the binaries we should
 
 1. Download them to some local folder
 2. Bind-mount that folder into the container
 3. Flash them to the device
 
+Here comes another speciality of CloudReady: the home directories are encrypted. This is completely transparent under
+the usual circumstances, but as the docker daemon runs in a completely different context (and with a different user),
+bind-mounting part of user chronos` home directory into a container would raise a lot of interesting problems:
 
 ```
-mkdir ~/Downloads/esp32-demo-latest
-cd ~/Downloads/esp32-demo-latest
-curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/bootloader/bootloader.bin
-curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/hello-world.bin
-curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/partition_table/partition-table.bin
-```
-
-```
-sudo docker run --rm -it --entrypoint=/bin/bash --privileged=true -v /dev:/hostdev -v ~/Downloads/esp32-demo-latest:/home/jenkins/images eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
-esptool.py --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 40m 0x1000 images/bootloader.bin 0x8000 images/partition-table.bin 0x10000 images/hello-world.bin
-```
-
-
-### Building the binaries on localhost
-
-Of course to do any work in that container we'd need the sources, which (in this example) I've cloned into
-`/home/chronos/Downloads/src/esp32_rtos_project_skel` and that we'll bind-mount into the container as well:
-
-```
-sudo docker run --rm -it --entrypoint=/bin/bash --privileged=true -v /dev:/hostdev -v ~/Downloads/src/esp32_rtos_project_skel:/home/jenkins/agent/workspace/esp32-demo eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
-```
-
-**FIXME:** docker seems to have trouble with `fscrypt`, because the bind-mounted folder is not writeable:
-```
-jenkins@b763229fadac:~/agent/workspace/esp32-demo$ touch build/qwer
+jenkins@b763229fadac:~/esp32-demo$ touch build/qwer
 touch: cannot touch 'build/qwer': Required key not available
 ```
 
 Others seem to have encountered [something](https://github.com/google/fscrypt/issues/128) like this.
 
+To circumvent this problem, let's create (an unencrypted) working folder on the *stateful partition*:
+```
+sudo mkdir /mnt/stateful_partition/chronos_work
+sudo chown chronos:chronos /mnt/stateful_partition/chronos_work
+```
+
+NOTE: This will be stored unencrypted, so if you lose your laptop, the contents here will be accessible for anyone who
+finds it.
+
+So, let's create some image download folder here and download those images:
+
+```
+mkdir /mnt/stateful_partition/chronos_work/images
+cd /mnt/stateful_partition/chronos_work/images
+curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/bootloader/bootloader.bin
+curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/hello-world.bin
+curl -LO http://esp32-builds.wodeewa.com/esp32-demo/latest/partition_table/partition-table.bin
+```
+
+And then let's flash them to the device:
+```
+sudo docker run --rm -it --entrypoint=/bin/bash --privileged=true -v /dev:/hostdev -v /mnt/stateful_partition/chronos_work:/home/jenkins/agent eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
+cd agent/images
+esptool.py --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 40m 0x1000 bootloader.bin 0x8000 partition-table.bin 0x10000 hello-world.bin
+```
+
+
+### Building the binaries on localhost
+
+Of course to do any work in that container we'd need the sources, so let's clone them into /mnt/stateful_partition/chronos_work:
+```
+cd /mnt/stateful_partition/chronos_work/
+git clone https://github.com/gsimon75/esp32_rtos_project_skel.git
+```
+
+Then let's spin up a container (just as before), then build and flash the results:
+```
+sudo docker run --rm -it --entrypoint=/bin/bash --privileged=true -v /dev:/hostdev -v /mnt/stateful_partition/chronos_work:/home/jenkins/agent eu.gcr.io/networksandbox-232012/esp32-rtos-sdk
+cd agent/esp32_rtos_project_skel
+idf.py build
+...
+idf.py flash
+```
+
+In the image there is `git` and `vim`, so it could even be used for development :), though this is not an intended purpose.
 
 
 ## TODO
