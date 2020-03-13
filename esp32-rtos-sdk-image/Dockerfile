@@ -11,7 +11,9 @@ RUN apt-get update ;\
     apt-get install -y vim minicom git wget libncurses-dev flex bison gperf cmake ninja-build ccache libffi-dev libssl-dev libusb-1.0-0 python3 ;\
     ln -sf /usr/bin/python3 /usr/bin/python ;\
     apt-get install -y python3-pip python3-setuptools python3-serial python3-click python3-cryptography python3-future python3-pyparsing python3-pyelftools ;\
-    apt-get clean
+    apt-get clean ;\
+    mkdir /etc/minicom
+COPY minirc /etc/minicom/minirc.dfl
 
 # user=jenkins, uid=1000
 USER jenkins

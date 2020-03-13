@@ -1,0 +1,6 @@
+pu port		/hostdev/ttyUSB0
+pu baudrate	115200
+pu bits		8
+pu parity	N
+pu stopbits	1
+
