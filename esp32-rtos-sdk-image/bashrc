@@ -10,3 +10,7 @@ unalias -a
 
 . $IDF_PATH/export.sh
 
+export IDF_PATH
+export ESPTOOL_PORT
+export ESPTOOL_BAUD
+
